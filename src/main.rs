@@ -12,7 +12,7 @@ impl Default for Settings {
     fn default() -> Self {
         let base = if let Ok(p)=std::env::var("APPDATA") { PathBuf::from(p).join(".minecraft") }
         else if let Ok(h)=std::env::var("HOME") { PathBuf::from(h).join(".minecraft") } else { PathBuf::from(".minecraft") };
-        Self { minecraft_dir: base.to_string_lossy().to_string(), java_path: "java".into(), ram_gb: 4, version: "1.21.11".into(), username: "Player".into(), instances: Vec::new(), active_instance: 0 }
+        Self { minecraft_dir: base.to_string_lossy().to_string(), java_path: "auto".into(), ram_gb: 4, version: "1.21.11".into(), username: "Player".into(), instances: Vec::new(), active_instance: 0 }
     }
 }
 #[derive(Serialize, Deserialize, Clone)]
@@ -32,6 +32,87 @@ struct VoidLauncher {
     ely_username: String, ely_password: String, ely_totp: String,
     ely_session: Option<ElySession>
 }
+fn java_major_for_version(version: &str) -> u32 {
+    let parts: Vec<u32> = version.split('.').filter_map(|p| p.parse().ok()).collect();
+    if parts.first() == Some(&1) {
+        match parts.get(1).copied().unwrap_or(21) {
+            21.. => 21,
+            18..=20 => 17,
+            17 => 16,
+            _ => 8,
+        }
+    } else { 21 }
+}
+
+fn java_version_ok(executable: &std::path::Path, required: u32) -> bool {
+    let Ok(output) = Command::new(executable).arg("-version").output() else { return false; };
+    let text = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    let Some(start) = text.find("version \"") else { return false; };
+    let rest = &text[start + 9..];
+    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit() || *c == '.').collect();
+    let major = if digits.starts_with("1.") { digits.split('.').nth(1).and_then(|x| x.parse::<u32>().ok()).unwrap_or(0) }
+        else { digits.split('.').next().and_then(|x| x.parse::<u32>().ok()).unwrap_or(0) };
+    major >= required
+}
+
+fn find_java_exe(root: &std::path::Path, depth: usize) -> Option<PathBuf> {
+    if depth > 5 { return None; }
+    for entry in fs::read_dir(root).ok()?.flatten() {
+        let path = entry.path();
+        if path.is_file() && path.file_name().and_then(|n| n.to_str()).map(|n| n.eq_ignore_ascii_case("java.exe")).unwrap_or(false) { return Some(path); }
+        if path.is_dir() { if let Some(found) = find_java_exe(&path, depth + 1) { return Some(found); } }
+    }
+    None
+}
+
+fn ensure_java(configured: &str, version: &str, send: &impl Fn(String)) -> Result<PathBuf, String> {
+    let required = java_major_for_version(version);
+    let configured = configured.trim();
+    if !configured.is_empty() && !configured.eq_ignore_ascii_case("auto") {
+        let candidate = PathBuf::from(configured);
+        if java_version_ok(&candidate, required) { return Ok(candidate); }
+        if configured.eq_ignore_ascii_case("java") {
+            let candidate = PathBuf::from("java");
+            if java_version_ok(&candidate, required) { return Ok(candidate); }
+        } else { return Err(format!("Указанная Java не подходит. Для Minecraft {version} нужна Java {required} или новее.")); }
+    } else {
+        let candidate = PathBuf::from("java");
+        if java_version_ok(&candidate, required) { return Ok(candidate); }
+    }
+    let local = std::env::var_os("LOCALAPPDATA").map(PathBuf::from).or_else(|| dirs::data_local_dir()).ok_or("Не удалось определить папку AppData для Java")?;
+    let root = local.join("VoidLauncher").join("runtime").join(format!("java{required}"));
+    if let Some(found) = find_java_exe(&root, 0) { if java_version_ok(&found, required) { return Ok(found); } }
+    send(format!("Java {required} не найдена. Скачиваю Eclipse Temurin…"));
+    fs::create_dir_all(&root).map_err(|e| e.to_string())?;
+    let url = format!("https://api.adoptium.net/v3/binary/latest/{required}/ga/windows/x64/jre/hotspot/normal/eclipse");
+    let client = reqwest::blocking::Client::builder().timeout(std::time::Duration::from_secs(900)).user_agent("VoidLauncher/1.0").build().map_err(|e| e.to_string())?;
+    let mut bytes = None;
+    let mut last_error = String::new();
+    for attempt in 1..=4 {
+        match client.get(&url).send().and_then(|r| r.error_for_status()).and_then(|r| r.bytes()) {
+            Ok(data) => { bytes = Some(data); break; }
+            Err(e) => { last_error = e.to_string(); if attempt < 4 { send(format!("Ошибка загрузки Java, повтор {attempt}/4…")); std::thread::sleep(std::time::Duration::from_secs(2_u64.pow(attempt as u32))); } }
+        }
+    }
+    let bytes = bytes.ok_or_else(|| format!("Не удалось скачать Java: {last_error}"))?;
+    send("Распаковываю Java…".into());
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).map_err(|e| e.to_string())?;
+    for i in 0..archive.len() {
+        let mut item = archive.by_index(i).map_err(|e| e.to_string())?;
+        let Some(relative) = item.enclosed_name().map(|p| p.to_path_buf()) else { continue; };
+        let target = root.join(relative);
+        if item.is_dir() { fs::create_dir_all(&target).map_err(|e| e.to_string())?; }
+        else {
+            if let Some(parent) = target.parent() { fs::create_dir_all(parent).map_err(|e| e.to_string())?; }
+            let mut out = fs::File::create(&target).map_err(|e| e.to_string())?;
+            std::io::copy(&mut item, &mut out).map_err(|e| e.to_string())?;
+        }
+    }
+    let java = find_java_exe(&root, 0).ok_or("После распаковки Java не найден java.exe")?;
+    if !java_version_ok(&java, required) { return Err("Загруженная Java не прошла проверку версии".into()); }
+    Ok(java)
+}
+
 impl VoidLauncher {
     fn new() -> Self {
         let settings = fs::read_to_string("voidlauncher.json").ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
@@ -180,6 +261,7 @@ impl VoidLauncher {
             let send = |message: String| { let _ = tx.send(message); };
             let result = (|| -> std::result::Result<(), String> {
                 fs::create_dir_all(&game_dir).map_err(|e| e.to_string())?;
+                let java_executable = ensure_java(&java, &version, &send)?;
                 send(format!("Скачивание файлов Minecraft {version} и Fabric…"));
                 let launcher = mc_launcher_core::prelude::Launcher::new(&game_dir);
                 let mut installed = None;
@@ -228,7 +310,7 @@ impl VoidLauncher {
                 };
                 let options = mc_launcher_core::prelude::LaunchOptions {
                     account,
-                    java_executable: Some(PathBuf::from(java)),
+                    java_executable: Some(java_executable),
                     game_directory: Some(game_dir.clone()),
                     ..Default::default()
                 };
@@ -376,8 +458,8 @@ impl App for VoidLauncher {
                     }
                     ui.horizontal(|ui|{ui.label("ОЗУ (ГБ):");ui.add(egui::DragValue::new(&mut self.settings.ram_gb).range(2..=32));});
                     ui.horizontal(|ui|{ui.label("Игровой ник (Offline):");ui.text_edit_singleline(&mut self.settings.username);});
-                    ui.horizontal(|ui|{ui.label("Java:");ui.text_edit_singleline(&mut self.settings.java_path);});
-                    ui.label("Для Minecraft 1.21.11 рекомендуется Java 21.");
+                    ui.horizontal(|ui|{ui.label("Java (auto):");ui.text_edit_singleline(&mut self.settings.java_path);});
+                    ui.label("Java: auto — лаунчер сам найдёт или скачает подходящую версию.");
                     ui.horizontal(|ui|{ui.label("Корневая папка:");ui.text_edit_singleline(&mut self.settings.minecraft_dir);});
                     if ui.button("Сохранить настройки").clicked(){self.save();}
                     ui.hyperlink_to("Регистрация и аккаунт Ely.by","https://ely.by/");
