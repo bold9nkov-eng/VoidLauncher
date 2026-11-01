@@ -1,7 +1,7 @@
 use eframe::{egui, App};
 use serde::{Deserialize, Serialize};
 use std::{fs, path::PathBuf, process::Command};
-#[cfg(windows)] use std::os::windows::process::CommandExt;
+#[cfg(windows)] use std::os::windows::ffi::OsStrExt;
 
 #[derive(Serialize, Deserialize, Clone)]
 struct Settings { minecraft_dir: String, java_path: String, ram_gb: u32, version: String, #[serde(default)] instances: Vec<Instance>, #[serde(default)] active_instance: usize }
@@ -112,9 +112,11 @@ impl VoidLauncher {
         }
     }
     fn launch_official(&mut self) {
-        let result=open::that("minecraft://");
-        self.status=match result { Ok(_)=>"Открываю Minecraft Launcher без окна CMD. Для запуска выбери профиль экземпляра.".into(),
-            Err(e)=>format!("Не удалось открыть Minecraft Launcher: {e}") };
+        let result = open_minecraft_launcher();
+        self.status = match result {
+            Ok(()) => "Передал ссылку minecraft:// Windows. Если лаунчер не появился, установи официальный Minecraft Launcher и назначь его обработчиком ссылок minecraft://.".into(),
+            Err(e) => format!("Не удалось открыть Minecraft Launcher: {e}")
+        };
     }
 }
 impl App for VoidLauncher {
@@ -202,4 +204,27 @@ impl App for VoidLauncher {
 fn main()->eframe::Result<()> {
     let options=eframe::NativeOptions{viewport:egui::ViewportBuilder::default().with_inner_size([900.0,620.0]).with_min_inner_size([720.0,500.0]),..Default::default()};
     eframe::run_native("VoidLauncher",options,Box::new(|_cc|Ok(Box::new(VoidLauncher::new()))))
+}
+
+#[cfg(windows)]
+fn open_minecraft_launcher() -> Result<(), String> {
+    use std::{ffi::OsStr, ptr};
+    let verb: Vec<u16> = OsStr::new("open").encode_wide().chain(std::iter::once(0)).collect();
+    let target: Vec<u16> = OsStr::new("minecraft://").encode_wide().chain(std::iter::once(0)).collect();
+    let result = unsafe {
+        windows_sys::Win32::UI::Shell::ShellExecuteW(
+            ptr::null_mut(), verb.as_ptr(), target.as_ptr(),
+            ptr::null(), ptr::null(), 1
+        )
+    };
+    if (result as isize) > 32 {
+        Ok(())
+    } else {
+        Err(format!("Windows не смог открыть ссылку minecraft:// (код {}). Проверь установку официального Minecraft Launcher.", result as isize))
+    }
+}
+
+#[cfg(not(windows))]
+fn open_minecraft_launcher() -> Result<(), String> {
+    open::that("minecraft://").map_err(|e| e.to_string())
 }
