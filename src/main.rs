@@ -1,23 +1,43 @@
 use eframe::{egui, App};
 use serde::{Deserialize, Serialize};
 use std::{fs, path::PathBuf, process::Command};
+#[cfg(windows)] use std::os::windows::process::CommandExt;
 
 #[derive(Serialize, Deserialize, Clone)]
-struct Settings { minecraft_dir: String, java_path: String, ram_gb: u32, version: String }
+struct Settings { minecraft_dir: String, java_path: String, ram_gb: u32, version: String, #[serde(default)] instances: Vec<Instance>, #[serde(default)] active_instance: usize }
+#[derive(Serialize, Deserialize, Clone)]
+struct Instance { name: String, version: String, path: String }
 impl Default for Settings {
     fn default() -> Self {
         let base = if let Ok(p)=std::env::var("APPDATA") { PathBuf::from(p).join(".minecraft") }
         else if let Ok(h)=std::env::var("HOME") { PathBuf::from(h).join(".minecraft") } else { PathBuf::from(".minecraft") };
-        Self { minecraft_dir: base.to_string_lossy().to_string(), java_path: "java".into(), ram_gb: 4, version: "1.21.11".into() }
+        Self { minecraft_dir: base.to_string_lossy().to_string(), java_path: "java".into(), ram_gb: 4, version: "1.21.11".into(), instances: Vec::new(), active_instance: 0 }
     }
 }
-struct VoidLauncher { settings: Settings, status: String, tab: usize }
+struct VoidLauncher { settings: Settings, status: String, tab: usize, new_instance_name: String }
 impl VoidLauncher {
     fn new() -> Self {
         let settings = fs::read_to_string("voidlauncher.json").ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
-        Self { settings, status: "Готов к работе. Настрой папку игры.".into(), tab: 0 }
+        Self { settings, status: "Создай свой первый экземпляр Minecraft.".into(), tab: 0, new_instance_name: "Vanilla 1.21.11".into() }
     }
-    fn dir(&self) -> PathBuf { PathBuf::from(&self.settings.minecraft_dir) }
+    fn dir(&self) -> PathBuf { self.settings.instances.get(self.settings.active_instance).map(|i|PathBuf::from(&i.path)).unwrap_or_else(||PathBuf::from(&self.settings.minecraft_dir).join("instances").join("Default")) }
+    fn create_instance(&mut self) {
+        let name=self.new_instance_name.trim().to_string();
+        if name.is_empty() { self.status="Введи название экземпляра.".into(); return; }
+        let safe=name.chars().map(|c|if c.is_ascii_alphanumeric() || c==' ' || c=='-' || c=='_' {c} else {'_'}).collect::<String>();
+        let path=PathBuf::from(&self.settings.minecraft_dir).join("instances").join(&safe);
+        if path.exists() { self.status="Экземпляр с таким именем уже существует.".into(); return; }
+        if let Err(e)=fs::create_dir_all(&path) { self.status=format!("Не удалось создать экземпляр: {e}"); return; }
+        for folder in ["mods","resourcepacks","shaderpacks","config"] { let _=fs::create_dir_all(path.join(folder)); }
+        self.settings.instances.push(Instance{name,version:self.settings.version.clone(),path:path.to_string_lossy().to_string()});
+        self.settings.active_instance=self.settings.instances.len()-1;
+        self.save(); self.status="Экземпляр создан. Папки mods, resourcepacks и shaderpacks готовы.".into();
+    }
+    fn open_instance_folder(&mut self, folder:&str) { let p=self.dir().join(folder); let _=fs::create_dir_all(&p); self.open_path(&p); }
+    fn open_path(&mut self,p:&std::path::Path) {
+        let result=if cfg!(target_os="windows") { Command::new("explorer").arg(p).spawn() } else if cfg!(target_os="macos") { Command::new("open").arg(p).spawn() } else { Command::new("xdg-open").arg(p).spawn() };
+        self.status=match result {Ok(_)=>format!("Открыта папка: {}",p.display()),Err(e)=>format!("Не удалось открыть папку: {e}")};
+    }
     fn save(&mut self) {
         self.status = match serde_json::to_string_pretty(&self.settings).ok().and_then(|s| fs::write("voidlauncher.json",s).ok()) {
             Some(_) => "Настройки сохранены.".into(), None => "Не удалось сохранить настройки.".into()
@@ -92,23 +112,30 @@ impl VoidLauncher {
         }
     }
     fn launch_official(&mut self) {
-        let result=if cfg!(target_os="windows") { Command::new("cmd").args(["/C","start","","minecraft://"]).spawn() }
-        else if cfg!(target_os="macos") { Command::new("open").arg("minecraft://").spawn() }
-        else { Command::new("xdg-open").arg("minecraft://").spawn() };
-        self.status=match result { Ok(_)=>"Открываю официальный Minecraft Launcher. Выбери установленный Fabric-профиль.".into(),
+        let result=open::that("minecraft://");
+        self.status=match result { Ok(_)=>"Открываю Minecraft Launcher без окна CMD. Для запуска выбери профиль экземпляра.".into(),
             Err(e)=>format!("Не удалось открыть Minecraft Launcher: {e}") };
     }
 }
 impl App for VoidLauncher {
     fn update(&mut self, ctx:&egui::Context, _frame:&mut eframe::Frame) {
-        egui::TopBottomPanel::top("header").show(ctx,|ui| { ui.horizontal(|ui| {
+        let mut visuals=egui::Visuals::dark();
+        visuals.panel_fill=egui::Color32::from_rgb(18,12,31);
+        visuals.window_fill=egui::Color32::from_rgb(24,15,42);
+        visuals.extreme_bg_color=egui::Color32::from_rgb(10,7,18);
+        visuals.widgets.noninteractive.bg_fill=egui::Color32::from_rgb(31,20,52);
+        visuals.widgets.inactive.bg_fill=egui::Color32::from_rgb(52,29,82);
+        visuals.widgets.hovered.bg_fill=egui::Color32::from_rgb(100,48,150);
+        visuals.widgets.active.bg_fill=egui::Color32::from_rgb(142,72,205);
+        ctx.set_visuals(visuals);
+        egui::TopBottomPanel::top("header").frame(egui::Frame::default().fill(egui::Color32::from_rgb(35,17,58)).inner_margin(12.0)).show(ctx,|ui| { ui.horizontal(|ui| {
             ui.heading(egui::RichText::new("VOID").color(egui::Color32::from_rgb(190,110,255)).strong());
             ui.heading("LAUNCHER");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center),|ui| { ui.label("Fabric Edition"); });
         }); });
         egui::SidePanel::left("navigation").resizable(false).default_width(145.0).show(ctx,|ui| {
             ui.add_space(12.0);
-            for (i,label) in ["Главная","Моды","Ресурспаки","Шейдеры","Настройки"].iter().enumerate() {
+            for (i,label) in ["Экземпляры","Настройки"].iter().enumerate() {
                 if ui.selectable_label(self.tab==i,*label).clicked(){self.tab=i;}
             }
             ui.with_layout(egui::Layout::bottom_up(egui::Align::Min),|ui| {ui.label(egui::RichText::new("VoidLauncher 0.1.0").weak());});
@@ -117,51 +144,54 @@ impl App for VoidLauncher {
             ui.add_space(8.0);
             match self.tab {
                 0=>{
-                    ui.heading("Добро пожаловать в VoidLauncher");
-                    ui.label("Лёгкий лаунчер Minecraft с Fabric и управлением файлами.");
-                    ui.add_space(16.0);
-                    ui.group(|ui|{
-                        ui.label("Версия Minecraft");
-                        egui::ComboBox::from_id_salt("version").selected_text(&self.settings.version).show_ui(ui,|ui|{
-                            ui.selectable_value(&mut self.settings.version,"1.21.11".into(),"1.21.11");
-                            ui.selectable_value(&mut self.settings.version,"26.3".into(),"26.3 (если поддерживается Fabric)");
-                        });
-                        ui.label(format!("Папка игры: {}",self.settings.minecraft_dir));
-                        if ui.button("Выбрать папку игры").clicked(){if let Some(p)=rfd::FileDialog::new().pick_folder(){self.settings.minecraft_dir=p.to_string_lossy().to_string();}}
-                        if ui.button("Установить Fabric для выбранной версии").clicked(){self.install_fabric();}
+                    ui.heading(egui::RichText::new("ТВОИ ЭКЗЕМПЛЯРЫ").color(egui::Color32::from_rgb(205,145,255)).size(26.0).strong());
+                    ui.label("Отдельные сборки Minecraft — у каждой свои моды, ресурспаки и настройки.");
+                    ui.add_space(14.0);
+                    egui::Frame::group(ui.style()).fill(egui::Color32::from_rgb(34,20,55)).rounding(12.0).inner_margin(14.0).show(ui,|ui|{
+                        ui.label(egui::RichText::new("НОВЫЙ ЭКЗЕМПЛЯР").color(egui::Color32::from_rgb(190,125,245)).strong());
+                        ui.horizontal(|ui|{ui.text_edit_singleline(&mut self.new_instance_name); if ui.button("＋ Создать").clicked(){self.create_instance();}});
                     });
                     ui.add_space(12.0);
-                    if ui.button(egui::RichText::new("ОТКРЫТЬ MINECRAFT LAUNCHER").strong()).clicked(){self.launch_official();}
-                    ui.label("После установки Fabric выбери профиль Fabric в официальном лаунчере.");
-                    ui.hyperlink_to("Открыть сайт Ely.by для регистрации / входа","https://ely.by/");
-                    ui.label("Вход Ely.by внутри VoidLauncher пока не реализован. Не вводи пароль Ely.by в приложение.");
-                }
-                1=>{
-                    ui.heading("Моды Fabric");
-                    ui.label("Импортируй .jar-файлы в папку mods.");
-                    if ui.button("Добавить мод (.jar)").clicked(){self.import_file("mods",&["jar"]);}
-                    if ui.button("Открыть папку mods").clicked(){self.open_dir("mods");}
-                    self.show_file_list(ui,"mods","Установленные моды");
-                }
-                2=>{
-                    ui.heading("Ресурспаки");
-                    if ui.button("Импортировать ZIP").clicked(){self.import_file("resourcepacks",&["zip"]);}
-                    if ui.button("Открыть папку resourcepacks").clicked(){self.open_dir("resourcepacks");}
-                    self.show_file_list(ui,"resourcepacks","Добавленные ресурспаки");
-                }
-                3=>{
-                    ui.heading("Шейдеры");
-                    ui.label("Для шейдеров установи Iris в Fabric-профиль.");
-                    if ui.button("Импортировать шейдерпак ZIP").clicked(){self.import_file("shaderpacks",&["zip"]);}
-                    if ui.button("Открыть папку shaderpacks").clicked(){self.open_dir("shaderpacks");}
-                    self.show_file_list(ui,"shaderpacks","Добавленные шейдеры");
+                    if self.settings.instances.is_empty(){ui.label("Пока нет экземпляров. Создай первый выше.");}
+                    let instances=self.settings.instances.clone();
+                    for (i,instance) in instances.iter().enumerate(){
+                        egui::Frame::group(ui.style()).fill(if i==self.settings.active_instance {egui::Color32::from_rgb(55,29,83)} else {egui::Color32::from_rgb(27,18,43)}).rounding(10.0).inner_margin(12.0).show(ui,|ui|{
+                            ui.horizontal(|ui|{
+                                ui.vertical(|ui|{
+                                    ui.label(egui::RichText::new(&instance.name).size(18.0).strong());
+                                    ui.label(format!("Minecraft {} • Fabric",instance.version));
+                                    ui.label(egui::RichText::new(&instance.path).weak().small());
+                                });
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center),|ui|{
+                                    if ui.button("▶ Играть").clicked(){self.settings.active_instance=i;self.launch_official();}
+                                    if ui.button("Папка").clicked(){self.settings.active_instance=i;self.open_path(std::path::Path::new(&instance.path));}
+                                    if ui.button("Выбрать").clicked(){self.settings.active_instance=i;}
+                                });
+                            });
+                        });
+                        ui.add_space(6.0);
+                    }
                 }
                 _=>{
-                    ui.heading("Настройки");
-                    ui.horizontal(|ui|{ui.label("Оперативная память (ГБ):");ui.add(egui::DragValue::new(&mut self.settings.ram_gb).range(2..=32));});
-                    ui.horizontal(|ui|{ui.label("Путь к Java:");ui.text_edit_singleline(&mut self.settings.java_path);});
-                    ui.label("Для Minecraft 1.21.11 обычно нужна Java 21.");
+                    ui.heading(egui::RichText::new("НАСТРОЙКИ").color(egui::Color32::from_rgb(205,145,255)).size(25.0).strong());
+                    if let Some(inst)=self.settings.instances.get(self.settings.active_instance).cloned(){
+                        ui.label(format!("Активный экземпляр: {} ({})",inst.name,inst.version));
+                        ui.label("Папки экземпляра — добавляй файлы напрямую:");
+                        ui.horizontal_wrapped(|ui|{
+                            if ui.button("📁 mods").clicked(){self.open_instance_folder("mods");}
+                            if ui.button("📁 resourcepacks").clicked(){self.open_instance_folder("resourcepacks");}
+                            if ui.button("📁 shaderpacks").clicked(){self.open_instance_folder("shaderpacks");}
+                            if ui.button("📁 config").clicked(){self.open_instance_folder("config");}
+                            if ui.button("📂 Папка экземпляра").clicked(){let p=self.dir();self.open_path(&p);}
+                        });
+                        ui.separator();
+                    } else {ui.label("Сначала создай экземпляр на вкладке «Экземпляры».");}
+                    ui.horizontal(|ui|{ui.label("ОЗУ (ГБ):");ui.add(egui::DragValue::new(&mut self.settings.ram_gb).range(2..=32));});
+                    ui.horizontal(|ui|{ui.label("Java:");ui.text_edit_singleline(&mut self.settings.java_path);});
+                    ui.label("Для Minecraft 1.21.11 рекомендуется Java 21.");
+                    ui.horizontal(|ui|{ui.label("Корневая папка:");ui.text_edit_singleline(&mut self.settings.minecraft_dir);});
                     if ui.button("Сохранить настройки").clicked(){self.save();}
+                    ui.hyperlink_to("Регистрация и аккаунт Ely.by","https://ely.by/");
                 }
             }
             ui.add_space(20.0);ui.separator();
