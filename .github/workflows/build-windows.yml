@@ -1,0 +1,28 @@
+name: Build VoidLauncher for Windows
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+      - name: Build release
+        run: cargo build --release
+      - name: Upload Windows executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: VoidLauncher-Windows
+          path: target/release/voidlauncher.exe
+          if-no-files-found: error
+          retention-days: 14
