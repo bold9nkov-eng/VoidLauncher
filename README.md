@@ -1,31 +1,37 @@
 # VoidLauncher
 
-Windows desktop launcher prototype written in Rust + egui.
+A Windows-first Minecraft launcher written in Rust + egui.
 
-## Download the Windows build
+## Current development build
 
-GitHub Actions builds a Windows executable on every push to `main` and on manual dispatch.
+VoidLauncher now uses `mc-launcher-core` to install Minecraft/Fabric profiles and build a direct Java launch command. It does not open the official Minecraft Launcher.
 
-1. Open the **Actions** tab.
-2. Select **Build VoidLauncher for Windows**.
-3. Open the latest successful run.
-4. Download and extract the `VoidLauncher-Windows` artifact.
-5. Run `voidlauncher.exe`.
+Implemented in the current branch:
+- Separate instances with their own game folders.
+- Fabric installation on first launch.
+- Offline username launch.
+- Ely.by password authentication and authlib-injector launch integration (experimental; must be tested against a real Ely.by account).
+- Automatic Java runtime detection; if the required runtime is missing, the launcher downloads Eclipse Temurin JRE into the user's local app data.
+- Java major-version selection for legacy releases and the 26.x release line.
+- Configurable memory limit.
+- Retry attempts for temporary Minecraft download network errors.
+- Per-instance mods, resourcepacks, shaderpacks, and config folders.
 
-## Included in this early build
+## Build on Windows
 
-- Dark purple desktop interface.
-- Fabric installer helper for the selected Minecraft version.
-- Import/open folders for Fabric mods, resource packs, and shader packs.
-- Saves basic launcher settings locally.
+GitHub Actions builds the Windows executable on every push to `main`.
 
-## Not implemented yet
+1. Open the repository's **Actions** tab.
+2. Open the latest successful **Build VoidLauncher for Windows** run.
+3. Download the `VoidLauncher-Windows` artifact.
+4. Extract the ZIP and run `voidlauncher.exe`.
 
-This is not yet a complete standalone game launcher:
-- The app opens the official Minecraft Launcher to start the game; it does not yet resolve libraries or launch Minecraft itself.
-- Ely.by OAuth/session authentication and skin display are not implemented. The app links to the official Ely.by website; never enter an Ely.by password into this prototype.
-- RAM setting is stored but is not yet passed to a custom game launch command.
-- Mod and pack activation is still handled in Minecraft or via the file manager.
-- Iris is not installed automatically.
+## First launch
 
-Minecraft, Fabric, and Ely.by are third-party projects and are not affiliated with VoidLauncher.
+The first launch can take a while. The launcher may need to download a Java runtime, the Minecraft client, libraries, assets, and Fabric files. Keep the launcher open and make sure the connection to Mojang/Minecraft download hosts is stable.
+
+## Important
+
+This is still a development build. A successful Windows compilation proves that the program builds, not that every Minecraft version, Ely.by account, graphics driver, or network environment has been runtime-tested. Do not treat the Ely.by integration as verified until it has been tested with an actual account and a real multiplayer login.
+
+Minecraft, Fabric, Eclipse Temurin, and Ely.by are third-party projects and are not affiliated with VoidLauncher.
