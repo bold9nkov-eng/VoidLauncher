@@ -1,6 +1,6 @@
 use eframe::{egui, App};
 use serde::{Deserialize, Serialize};
-use std::{fs, path::PathBuf, process::Command};
+use std::{fs, path::PathBuf, process::Command, sync::mpsc::{self, Receiver}};
 #[cfg(windows)] use std::os::windows::ffi::OsStrExt;
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -15,11 +15,11 @@ impl Default for Settings {
         Self { minecraft_dir: base.to_string_lossy().to_string(), java_path: "java".into(), ram_gb: 4, version: "1.21.11".into(), username: "Player".into(), instances: Vec::new(), active_instance: 0 }
     }
 }
-struct VoidLauncher { settings: Settings, status: String, tab: usize, new_instance_name: String }
+struct VoidLauncher { settings: Settings, status: String, tab: usize, new_instance_name: String, receiver: Option<Receiver<String>>, busy: bool }
 impl VoidLauncher {
     fn new() -> Self {
         let settings = fs::read_to_string("voidlauncher.json").ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
-        Self { settings, status: "Создай свой первый экземпляр Minecraft.".into(), tab: 0, new_instance_name: "Vanilla 1.21.11".into() }
+        Self { settings, status: "Создай свой первый экземпляр Minecraft.".into(), tab: 0, new_instance_name: "Vanilla 1.21.11".into(), receiver: None, busy: false }
     }
     fn dir(&self) -> PathBuf { self.settings.instances.get(self.settings.active_instance).map(|i|PathBuf::from(&i.path)).unwrap_or_else(||PathBuf::from(&self.settings.minecraft_dir).join("instances").join("Default")) }
     fn create_instance(&mut self) {
@@ -108,10 +108,15 @@ impl VoidLauncher {
         let java = self.settings.java_path.clone();
         let version = instance.version.clone();
         let game_dir = PathBuf::from(&instance.path);
-        self.status = format!("Установка Minecraft {version} + Fabric и запуск…");
+        let (tx, rx) = mpsc::channel();
+        self.receiver = Some(rx);
+        self.busy = true;
+        self.status = format!("Установка Minecraft {version} + Fabric…");
         std::thread::spawn(move || {
+            let send = |message: String| { let _ = tx.send(message); };
             let result = (|| -> std::result::Result<(), String> {
                 fs::create_dir_all(&game_dir).map_err(|e| e.to_string())?;
+                send(format!("Скачивание файлов Minecraft {version} и Fabric…"));
                 let launcher = mc_launcher_core::prelude::Launcher::new(&game_dir);
                 let request = mc_launcher_core::prelude::InstallRequest {
                     minecraft_version: version,
@@ -121,6 +126,7 @@ impl VoidLauncher {
                     java: mc_launcher_core::prelude::JavaInstallPolicy::Auto,
                 };
                 let installed = launcher.install(request).map_err(|e| e.to_string())?;
+                send("Игра установлена. Подготовка Java-команды…".into());
                 let profile = launcher.load_version(&installed.version_id).map_err(|e| e.to_string())?;
                 let options = mc_launcher_core::prelude::LaunchOptions {
                     account: mc_launcher_core::prelude::Account::offline(username),
@@ -139,13 +145,21 @@ impl VoidLauncher {
                 command.spawn().map_err(|e| format!("Не удалось запустить Minecraft: {e}"))?;
                 Ok(())
             })();
-            if let Err(error) = result { eprintln!("VoidLauncher: {error}"); }
+            match result {
+                Ok(()) => send("Готово: Minecraft запущен.".into()),
+                Err(error) => send(format!("Ошибка: {error}")),
+            }
         });
-        self.status = "Идёт подготовка игры в фоне. Первый запуск скачает файлы Minecraft и Fabric.".into();
     }
 }
 impl App for VoidLauncher {
     fn update(&mut self, ctx:&egui::Context, _frame:&mut eframe::Frame) {
+        if let Some(rx) = &self.receiver {
+            while let Ok(message) = rx.try_recv() {
+                self.status = message;
+                if self.status.starts_with("Готово:") || self.status.starts_with("Ошибка:") { self.busy = false; }
+            }
+        }
         let mut visuals=egui::Visuals::dark();
         visuals.panel_fill=egui::Color32::from_rgb(18,12,31);
         visuals.window_fill=egui::Color32::from_rgb(24,15,42);
@@ -190,7 +204,7 @@ impl App for VoidLauncher {
                                     ui.label(egui::RichText::new(&instance.path).weak().small());
                                 });
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center),|ui|{
-                                    if ui.button("▶ Играть").clicked(){self.settings.active_instance=i;self.launch_official();}
+                                    if ui.add_enabled(!self.busy, egui::Button::new("▶ Играть")).clicked(){self.settings.active_instance=i;self.launch_official();}
                                     if ui.button("Папка").clicked(){self.settings.active_instance=i;self.open_path(std::path::Path::new(&instance.path));}
                                     if ui.button("Выбрать").clicked(){self.settings.active_instance=i;}
                                 });
@@ -213,6 +227,7 @@ impl App for VoidLauncher {
                         });
                         ui.separator();
                     } else {ui.label("Сначала создай экземпляр на вкладке «Экземпляры».");}
+                    ui.horizontal(|ui|{ui.label("Версия Minecraft для новых экземпляров:");ui.text_edit_singleline(&mut self.settings.version);});
                     ui.horizontal(|ui|{ui.label("ОЗУ (ГБ):");ui.add(egui::DragValue::new(&mut self.settings.ram_gb).range(2..=32));});
                     ui.horizontal(|ui|{ui.label("Игровой ник (Offline):");ui.text_edit_singleline(&mut self.settings.username);});
                     ui.horizontal(|ui|{ui.label("Java:");ui.text_edit_singleline(&mut self.settings.java_path);});
