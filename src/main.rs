@@ -41,7 +41,7 @@ fn java_major_for_version(version: &str) -> u32 {
             17 => 16,
             _ => 8,
         }
-    } else { 21 }
+    } else if parts.first().copied().unwrap_or(21) >= 26 { 25 } else { 21 }
 }
 
 fn java_version_ok(executable: &std::path::Path, required: u32) -> bool {
@@ -453,7 +453,7 @@ impl App for VoidLauncher {
                         ui.separator();
                     } else {ui.label("Сначала создай экземпляр на вкладке «Экземпляры».");}
                     const MC_VERSIONS: &[&str] = &[
-                        "1.21.11", "1.21.10", "1.21.9", "1.21.8", "1.21.7",
+                        "26.3", "26.2", "26.1", "1.21.11", "1.21.10", "1.21.9", "1.21.8", "1.21.7",
                         "1.21.6", "1.21.5", "1.21.4", "1.21.3", "1.21.1",
                         "1.20.6", "1.20.4", "1.20.1", "1.19.4", "1.18.2",
                         "1.16.5", "1.12.2"
