@@ -299,6 +299,7 @@ impl VoidLauncher {
                 ))?;
                 send("Игра установлена. Подготовка Java-команды…".into());
                 let profile = launcher.load_version(&installed.version_id).map_err(|e| e.to_string())?;
+                let ely_session_for_args = ely_session.clone();
                 let account = if let Some(session) = ely_session {
                     mc_launcher_core::prelude::Account::Microsoft {
                         username: session.username,
@@ -327,7 +328,25 @@ impl VoidLauncher {
                     }
                     command.arg(format!("-javaagent:{}=ely.by", injector.display()));
                 }
-                command.args(&launch.args).current_dir(&launch.working_dir);
+                let mut launch_args: Vec<std::ffi::OsString> = launch.args.into_iter().map(Into::into).collect();
+                if let Some(session) = &ely_session_for_args {
+                    let replacements = [
+                        ("--username", session.username.as_str()),
+                        ("--uuid", session.uuid.as_str()),
+                        ("--accessToken", session.access_token.as_str()),
+                        ("--userType", "mojang"),
+                        ("--userProperties", "{}"),
+                    ];
+                    let mut index = 0;
+                    while index + 1 < launch_args.len() {
+                        let key = launch_args[index].to_string_lossy().to_string();
+                        if let Some((_, value)) = replacements.iter().find(|(flag, _)| *flag == key) {
+                            launch_args[index + 1] = (*value).into();
+                            index += 2;
+                        } else { index += 1; }
+                    }
+                }
+                command.args(&launch_args).current_dir(&launch.working_dir);
                 for (key, value) in launch.env { command.env(key, value); }
                 #[cfg(windows)] {
                     use std::os::windows::process::CommandExt;
