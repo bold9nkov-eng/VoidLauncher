@@ -251,6 +251,7 @@ impl VoidLauncher {
             self.status = "Укажи игровой ник или войди через Ely.by.".into(); return;
         }
         let java = self.settings.java_path.clone();
+        let ram_gb = self.settings.ram_gb.clamp(2, 32);
         let version = instance.version.clone();
         let game_dir = PathBuf::from(&instance.path);
         let (tx, rx) = mpsc::channel();
@@ -317,6 +318,7 @@ impl VoidLauncher {
                 };
                 let launch = launcher.build_launch_command_from_version(&profile, options).map_err(|e| e.to_string())?;
                 let mut command = Command::new(&launch.executable);
+                command.arg("-Xms1G").arg(format!("-Xmx{ram_gb}G"));
                 if use_ely {
                     let injector = game_dir.join("authlib-injector-1.2.8.jar");
                     if !injector.exists() {
@@ -340,7 +342,7 @@ impl VoidLauncher {
                     let mut index = 0;
                     while index + 1 < launch_args.len() {
                         let key = launch_args[index].to_string_lossy().to_string();
-                        if let Some((_, value)) = replacements.iter().find(|(flag, _)| *flag == key) {
+                        if let Some((_, value)) = replacements.iter().find(|(flag, _)| *flag == key.as_str()) {
                             launch_args[index + 1] = (*value).into();
                             index += 2;
                         } else { index += 1; }
