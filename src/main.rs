@@ -349,7 +349,31 @@ impl App for VoidLauncher {
                         });
                         ui.separator();
                     } else {ui.label("Сначала создай экземпляр на вкладке «Экземпляры».");}
-                    ui.horizontal(|ui|{ui.label("Версия Minecraft для новых экземпляров:");ui.text_edit_singleline(&mut self.settings.version);});
+                    const MC_VERSIONS: &[&str] = &[
+                        "1.21.11", "1.21.10", "1.21.9", "1.21.8", "1.21.7",
+                        "1.21.6", "1.21.5", "1.21.4", "1.21.3", "1.21.1",
+                        "1.20.6", "1.20.4", "1.20.1", "1.19.4", "1.18.2",
+                        "1.16.5", "1.12.2"
+                    ];
+                    ui.horizontal(|ui| {
+                        ui.label("Версия Minecraft:");
+                        egui::ComboBox::from_id_salt("minecraft_version_select")
+                            .selected_text(&self.settings.version)
+                            .show_ui(ui, |ui| {
+                                for version in MC_VERSIONS {
+                                    ui.selectable_value(&mut self.settings.version, (*version).to_string(), *version);
+                                }
+                            });
+                    });
+                    ui.label("Выбранная версия применяется к новым экземплярам.");
+                    if let Some(index) = self.settings.instances.get(self.settings.active_instance).map(|_| self.settings.active_instance) {
+                        let current = self.settings.instances[index].version.clone();
+                        if ui.button(format!("Применить {} к активному экземпляру (сейчас {})", self.settings.version, current)).clicked() {
+                            self.settings.instances[index].version = self.settings.version.clone();
+                            self.save();
+                            self.status = "Версия экземпляра обновлена. Нажми «Играть», чтобы установить её.".into();
+                        }
+                    }
                     ui.horizontal(|ui|{ui.label("ОЗУ (ГБ):");ui.add(egui::DragValue::new(&mut self.settings.ram_gb).range(2..=32));});
                     ui.horizontal(|ui|{ui.label("Игровой ник (Offline):");ui.text_edit_singleline(&mut self.settings.username);});
                     ui.horizontal(|ui|{ui.label("Java:");ui.text_edit_singleline(&mut self.settings.java_path);});
