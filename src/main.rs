@@ -42,6 +42,7 @@ impl VoidLauncher {
         }
     }
     fn install_fabric(&mut self) {
+        if let Err(e)=fs::create_dir_all(self.dir()) { self.status=format!("Не удалось создать папку игры: {e}"); return; }
         let url="https://meta.fabricmc.net/v2/versions/installer";
         let dest=self.dir().join("voidlauncher-fabric-installer.jar");
         let download=if cfg!(target_os="windows") {
@@ -56,6 +57,38 @@ impl VoidLauncher {
             }
             Ok(s)=>self.status=format!("Не удалось скачать установщик Fabric: {s}"),
             Err(e)=>self.status=format!("Ошибка загрузки Fabric: {e}")
+        }
+    }
+    fn toggle_file(&mut self, folder: &str, file_name: &str) {
+        let path=self.dir().join(folder).join(file_name);
+        let new_name=if file_name.ends_with(".disabled") { file_name.trim_end_matches(".disabled").to_string() }
+            else { format!("{file_name}.disabled") };
+        self.status=match fs::rename(&path,path.with_file_name(new_name)) {
+            Ok(())=>"Состояние файла изменено.".into(), Err(e)=>format!("Не удалось изменить файл: {e}")
+        };
+    }
+    fn remove_file(&mut self, folder: &str, file_name: &str) {
+        let path=self.dir().join(folder).join(file_name);
+        self.status=match fs::remove_file(path) { Ok(())=>"Файл удалён.".into(), Err(e)=>format!("Не удалось удалить файл: {e}") };
+    }
+    fn show_file_list(&mut self, ui: &mut egui::Ui, folder: &str, title: &str) {
+        ui.separator();
+        ui.label(egui::RichText::new(title).strong());
+        let dir=self.dir().join(folder);
+        let _=fs::create_dir_all(&dir);
+        let mut files:Vec<String>=fs::read_dir(&dir).ok().into_iter().flatten()
+            .filter_map(|e|e.ok()).filter(|e|e.path().is_file())
+            .filter_map(|e|e.file_name().into_string().ok()).collect();
+        files.sort();
+        if files.is_empty() { ui.label("Пока файлов нет."); }
+        for name in files {
+            let disabled=name.ends_with(".disabled");
+            ui.horizontal(|ui| {
+                ui.label(if disabled {"⏸"} else {"●"});
+                ui.label(&name);
+                if ui.small_button(if disabled {"Включить"} else {"Отключить"}).clicked() { self.toggle_file(folder,&name); }
+                if ui.small_button("Удалить").clicked() { self.remove_file(folder,&name); }
+            });
         }
     }
     fn launch_official(&mut self) {
@@ -108,19 +141,20 @@ impl App for VoidLauncher {
                     ui.label("Импортируй .jar-файлы в папку mods.");
                     if ui.button("Добавить мод (.jar)").clicked(){self.import_file("mods",&["jar"]);}
                     if ui.button("Открыть папку mods").clicked(){self.open_dir("mods");}
-                    ui.label("Для отключения переименуй .jar в .jar.disabled через проводник.");
+                    self.show_file_list(ui,"mods","Установленные моды");
                 }
                 2=>{
                     ui.heading("Ресурспаки");
                     if ui.button("Импортировать ZIP").clicked(){self.import_file("resourcepacks",&["zip"]);}
                     if ui.button("Открыть папку resourcepacks").clicked(){self.open_dir("resourcepacks");}
-                    ui.label("Активируй набор в настройках Minecraft.");
+                    self.show_file_list(ui,"resourcepacks","Добавленные ресурспаки");
                 }
                 3=>{
                     ui.heading("Шейдеры");
                     ui.label("Для шейдеров установи Iris в Fabric-профиль.");
                     if ui.button("Импортировать шейдерпак ZIP").clicked(){self.import_file("shaderpacks",&["zip"]);}
                     if ui.button("Открыть папку shaderpacks").clicked(){self.open_dir("shaderpacks");}
+                    self.show_file_list(ui,"shaderpacks","Добавленные шейдеры");
                 }
                 _=>{
                     ui.heading("Настройки");
