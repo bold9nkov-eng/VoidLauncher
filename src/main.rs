@@ -4,14 +4,15 @@ use std::{fs, path::PathBuf, process::Command};
 #[cfg(windows)] use std::os::windows::ffi::OsStrExt;
 
 #[derive(Serialize, Deserialize, Clone)]
-struct Settings { minecraft_dir: String, java_path: String, ram_gb: u32, version: String, #[serde(default)] instances: Vec<Instance>, #[serde(default)] active_instance: usize }
+struct Settings { minecraft_dir: String, java_path: String, ram_gb: u32, version: String, #[serde(default = "default_username")] username: String, #[serde(default)] instances: Vec<Instance>, #[serde(default)] active_instance: usize }
+fn default_username() -> String { "Player".into() }
 #[derive(Serialize, Deserialize, Clone)]
 struct Instance { name: String, version: String, path: String }
 impl Default for Settings {
     fn default() -> Self {
         let base = if let Ok(p)=std::env::var("APPDATA") { PathBuf::from(p).join(".minecraft") }
         else if let Ok(h)=std::env::var("HOME") { PathBuf::from(h).join(".minecraft") } else { PathBuf::from(".minecraft") };
-        Self { minecraft_dir: base.to_string_lossy().to_string(), java_path: "java".into(), ram_gb: 4, version: "1.21.11".into(), instances: Vec::new(), active_instance: 0 }
+        Self { minecraft_dir: base.to_string_lossy().to_string(), java_path: "java".into(), ram_gb: 4, version: "1.21.11".into(), username: "Player".into(), instances: Vec::new(), active_instance: 0 }
     }
 }
 struct VoidLauncher { settings: Settings, status: String, tab: usize, new_instance_name: String }
@@ -62,22 +63,7 @@ impl VoidLauncher {
         }
     }
     fn install_fabric(&mut self) {
-        if let Err(e)=fs::create_dir_all(self.dir()) { self.status=format!("Не удалось создать папку игры: {e}"); return; }
-        let url="https://meta.fabricmc.net/v2/versions/installer";
-        let dest=self.dir().join("voidlauncher-fabric-installer.jar");
-        let download=if cfg!(target_os="windows") {
-            Command::new("powershell").args(["-NoProfile","-Command",&format!("Invoke-WebRequest -Uri '{}' -OutFile '{}'",url,dest.to_string_lossy())]).status()
-        } else { Command::new("curl").args(["-L",url,"-o",&dest.to_string_lossy()]).status() };
-        match download {
-            Ok(s) if s.success() => {
-                let result=Command::new(&self.settings.java_path).arg("-jar").arg(&dest).arg("client").arg("-dir").arg(self.dir())
-                    .arg("-mcversion").arg(&self.settings.version).arg("-loader").arg("latest").status();
-                self.status=match result { Ok(s) if s.success()=>"Fabric installer завершил работу. Проверь профиль в официальном лаунчере.".into(),
-                    Ok(s)=>format!("Установщик Fabric завершился с кодом {s}."), Err(e)=>format!("Не удалось запустить Java: {e}") };
-            }
-            Ok(s)=>self.status=format!("Не удалось скачать установщик Fabric: {s}"),
-            Err(e)=>self.status=format!("Ошибка загрузки Fabric: {e}")
-        }
+        self.status = "Fabric устанавливается автоматически при нажатии «Играть».".into();
     }
     fn toggle_file(&mut self, folder: &str, file_name: &str) {
         let path=self.dir().join(folder).join(file_name);
@@ -112,11 +98,50 @@ impl VoidLauncher {
         }
     }
     fn launch_official(&mut self) {
-        let result = open_minecraft_launcher();
-        self.status = match result {
-            Ok(()) => "Передал ссылку minecraft:// Windows. Если лаунчер не появился, установи официальный Minecraft Launcher и назначь его обработчиком ссылок minecraft://.".into(),
-            Err(e) => format!("Не удалось открыть Minecraft Launcher: {e}")
+        let Some(instance) = self.settings.instances.get(self.settings.active_instance).cloned() else {
+            self.status = "Сначала создай экземпляр.".into(); return;
         };
+        let username = self.settings.username.trim().to_string();
+        if username.is_empty() || username.len() > 16 || !username.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            self.status = "Укажи игровой ник: 1–16 латинских букв, цифр или _.".into(); return;
+        }
+        let java = self.settings.java_path.clone();
+        let version = instance.version.clone();
+        let game_dir = PathBuf::from(&instance.path);
+        self.status = format!("Установка Minecraft {version} + Fabric и запуск…");
+        std::thread::spawn(move || {
+            let result = (|| -> Result<(), String> {
+                fs::create_dir_all(&game_dir).map_err(|e| e.to_string())?;
+                let launcher = mc_launcher_core::prelude::Launcher::new(&game_dir);
+                let request = mc_launcher_core::prelude::InstallRequest {
+                    minecraft_version: version,
+                    loader: Some(mc_launcher_core::prelude::LoaderSpec::Fabric {
+                        version: mc_launcher_core::prelude::LoaderVersion::LatestStable,
+                    }),
+                    java: mc_launcher_core::prelude::JavaInstallPolicy::Auto,
+                };
+                let installed = launcher.install(request).map_err(|e| e.to_string())?;
+                let profile = launcher.load_version(&installed.version_id).map_err(|e| e.to_string())?;
+                let options = mc_launcher_core::prelude::LaunchOptions {
+                    account: mc_launcher_core::prelude::Account::offline(username),
+                    java_executable: Some(PathBuf::from(java)),
+                    game_directory: Some(game_dir.clone()),
+                    ..Default::default()
+                };
+                let launch = launcher.build_launch_command_from_version(&profile, options).map_err(|e| e.to_string())?;
+                let mut command = Command::new(&launch.executable);
+                command.args(&launch.args).current_dir(&launch.working_dir);
+                for (key, value) in launch.env { command.env(key, value); }
+                #[cfg(windows)] {
+                    use std::os::windows::process::CommandExt;
+                    command.creation_flags(0x08000000);
+                }
+                command.spawn().map_err(|e| format!("Не удалось запустить Minecraft: {e}"))?;
+                Ok(())
+            })();
+            if let Err(error) = result { eprintln!("VoidLauncher: {error}"); }
+        });
+        self.status = "Идёт подготовка игры в фоне. Первый запуск скачает файлы Minecraft и Fabric.".into();
     }
 }
 impl App for VoidLauncher {
@@ -189,6 +214,7 @@ impl App for VoidLauncher {
                         ui.separator();
                     } else {ui.label("Сначала создай экземпляр на вкладке «Экземпляры».");}
                     ui.horizontal(|ui|{ui.label("ОЗУ (ГБ):");ui.add(egui::DragValue::new(&mut self.settings.ram_gb).range(2..=32));});
+                    ui.horizontal(|ui|{ui.label("Игровой ник (Offline):");ui.text_edit_singleline(&mut self.settings.username);});
                     ui.horizontal(|ui|{ui.label("Java:");ui.text_edit_singleline(&mut self.settings.java_path);});
                     ui.label("Для Minecraft 1.21.11 рекомендуется Java 21.");
                     ui.horizontal(|ui|{ui.label("Корневая папка:");ui.text_edit_singleline(&mut self.settings.minecraft_dir);});
