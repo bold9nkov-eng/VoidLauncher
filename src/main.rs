@@ -15,11 +15,27 @@ impl Default for Settings {
         Self { minecraft_dir: base.to_string_lossy().to_string(), java_path: "java".into(), ram_gb: 4, version: "1.21.11".into(), username: "Player".into(), instances: Vec::new(), active_instance: 0 }
     }
 }
-struct VoidLauncher { settings: Settings, status: String, tab: usize, new_instance_name: String, receiver: Option<Receiver<String>>, busy: bool }
+#[derive(Serialize, Deserialize, Clone)]
+struct ElySession { username: String, uuid: String, access_token: String }
+#[derive(Deserialize)]
+struct ElyProfile { id: String, name: String }
+#[derive(Deserialize)]
+struct ElyAuthResponse {
+    #[serde(rename = "accessToken")] access_token: Option<String>,
+    #[serde(rename = "selectedProfile")] selected_profile: Option<ElyProfile>,
+    #[serde(rename = "errorMessage")] error_message: Option<String>,
+    error: Option<String>,
+}
+struct VoidLauncher {
+    settings: Settings, status: String, tab: usize, new_instance_name: String,
+    receiver: Option<Receiver<String>>, busy: bool,
+    ely_username: String, ely_password: String, ely_totp: String,
+    ely_session: Option<ElySession>
+}
 impl VoidLauncher {
     fn new() -> Self {
         let settings = fs::read_to_string("voidlauncher.json").ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
-        Self { settings, status: "Создай свой первый экземпляр Minecraft.".into(), tab: 0, new_instance_name: "Vanilla 1.21.11".into(), receiver: None, busy: false }
+        Self { settings, status: "Создай свой первый экземпляр Minecraft.".into(), tab: 0, new_instance_name: "Vanilla 1.21.11".into(), receiver: None, busy: false, ely_username: String::new(), ely_password: String::new(), ely_totp: String::new(), ely_session: None }
     }
     fn dir(&self) -> PathBuf { self.settings.instances.get(self.settings.active_instance).map(|i|PathBuf::from(&i.path)).unwrap_or_else(||PathBuf::from(&self.settings.minecraft_dir).join("instances").join("Default")) }
     fn create_instance(&mut self) {
@@ -97,13 +113,61 @@ impl VoidLauncher {
             });
         }
     }
+    fn login_ely(&mut self) {
+        let username = self.ely_username.trim().to_string();
+        let mut password = self.ely_password.clone();
+        let totp = self.ely_totp.trim().to_string();
+        if username.is_empty() || password.is_empty() {
+            self.status = "Укажи логин/email и пароль Ely.by.".into();
+            return;
+        }
+        if !totp.is_empty() { password.push(':'); password.push_str(&totp); }
+        let (tx, rx) = mpsc::channel();
+        self.receiver = Some(rx);
+        self.busy = true;
+        self.status = "Выполняется вход в Ely.by…".into();
+        std::thread::spawn(move || {
+            let result = (|| -> Result<ElySession, String> {
+                let client_token = uuid::Uuid::new_v4().to_string();
+                let client = reqwest::blocking::Client::builder()
+                    .timeout(std::time::Duration::from_secs(25)).build().map_err(|e| e.to_string())?;
+                let response = client.post("https://authserver.ely.by/auth/authenticate")
+                    .json(&serde_json::json!({
+                        "username": username, "password": password,
+                        "clientToken": client_token, "requestUser": true
+                    })).send().map_err(|e| format!("Не удалось связаться с Ely.by: {e}"))?;
+                let status = response.status();
+                let body: ElyAuthResponse = response.json().map_err(|e| format!("Некорректный ответ Ely.by: {e}"))?;
+                if !status.is_success() {
+                    let message = body.error_message.unwrap_or_else(|| body.error.unwrap_or_else(|| format!("HTTP {status}")));
+                    if message.to_lowercase().contains("two factor") {
+                        return Err("Для аккаунта включена 2FA. Введи одноразовый код в поле TOTP и нажми «Войти» ещё раз.".into());
+                    }
+                    return Err(format!("Ely.by: {message}"));
+                }
+                let profile = body.selected_profile.ok_or("Ely.by не вернул выбранный игровой профиль")?;
+                let token = body.access_token.ok_or("Ely.by не вернул accessToken")?;
+                Ok(ElySession { username: profile.name, uuid: profile.id, access_token: token })
+            })();
+            match result {
+                Ok(session) => {
+                    let payload = serde_json::to_string(&session).unwrap_or_default();
+                    let _ = tx.send(format!("ELY_OK:{payload}"));
+                }
+                Err(error) => { let _ = tx.send(format!("Ошибка входа: {error}")); }
+            }
+        });
+    }
+
     fn launch_official(&mut self) {
         let Some(instance) = self.settings.instances.get(self.settings.active_instance).cloned() else {
             self.status = "Сначала создай экземпляр.".into(); return;
         };
         let username = self.settings.username.trim().to_string();
-        if username.is_empty() || username.len() > 16 || !username.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
-            self.status = "Укажи игровой ник: 1–16 латинских букв, цифр или _.".into(); return;
+        let ely_session = self.ely_session.clone();
+        let use_ely = ely_session.is_some();
+        if ely_session.is_none() && (username.is_empty() || username.len() > 16 || !username.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')) {
+            self.status = "Укажи игровой ник или войди через Ely.by.".into(); return;
         }
         let java = self.settings.java_path.clone();
         let version = instance.version.clone();
@@ -128,14 +192,34 @@ impl VoidLauncher {
                 let installed = launcher.install(request).map_err(|e| e.to_string())?;
                 send("Игра установлена. Подготовка Java-команды…".into());
                 let profile = launcher.load_version(&installed.version_id).map_err(|e| e.to_string())?;
+                let account = if let Some(session) = ely_session {
+                    mc_launcher_core::prelude::Account::Microsoft {
+                        username: session.username,
+                        uuid: session.uuid,
+                        access_token: session.access_token,
+                    }
+                } else {
+                    mc_launcher_core::prelude::Account::offline(username)
+                };
                 let options = mc_launcher_core::prelude::LaunchOptions {
-                    account: mc_launcher_core::prelude::Account::offline(username),
+                    account,
                     java_executable: Some(PathBuf::from(java)),
                     game_directory: Some(game_dir.clone()),
                     ..Default::default()
                 };
                 let launch = launcher.build_launch_command_from_version(&profile, options).map_err(|e| e.to_string())?;
                 let mut command = Command::new(&launch.executable);
+                if use_ely {
+                    let injector = game_dir.join("authlib-injector-1.2.8.jar");
+                    if !injector.exists() {
+                        send("Загрузка компонента авторизации Ely.by…".into());
+                        let bytes = reqwest::blocking::get("https://github.com/yushijinhun/authlib-injector/releases/download/v1.2.8/authlib-injector-1.2.8.jar")
+                            .and_then(|r| r.error_for_status()).map_err(|e| format!("Не удалось скачать authlib-injector: {e}"))?
+                            .bytes().map_err(|e| e.to_string())?;
+                        fs::write(&injector, &bytes).map_err(|e| e.to_string())?;
+                    }
+                    command.arg(format!("-javaagent:{}=ely.by", injector.display()));
+                }
                 command.args(&launch.args).current_dir(&launch.working_dir);
                 for (key, value) in launch.env { command.env(key, value); }
                 #[cfg(windows)] {
@@ -156,8 +240,21 @@ impl App for VoidLauncher {
     fn update(&mut self, ctx:&egui::Context, _frame:&mut eframe::Frame) {
         if let Some(rx) = &self.receiver {
             while let Ok(message) = rx.try_recv() {
-                self.status = message;
-                if self.status.starts_with("Готово:") || self.status.starts_with("Ошибка:") { self.busy = false; }
+                if let Some(payload) = message.strip_prefix("ELY_OK:") {
+                    match serde_json::from_str::<ElySession>(payload) {
+                        Ok(session) => {
+                            self.status = format!("Вход выполнен: {} (Ely.by).", session.username);
+                            self.ely_session = Some(session);
+                            self.ely_password.clear();
+                            self.ely_totp.clear();
+                            self.busy = false;
+                        }
+                        Err(e) => { self.status = format!("Ошибка обработки сессии Ely.by: {e}"); self.busy = false; }
+                    }
+                } else {
+                    self.status = message;
+                    if self.status.starts_with("Готово:") || self.status.starts_with("Ошибка:") { self.busy = false; }
+                }
             }
         }
         let mut visuals=egui::Visuals::dark();
@@ -176,7 +273,7 @@ impl App for VoidLauncher {
         }); });
         egui::SidePanel::left("navigation").resizable(false).default_width(145.0).show(ctx,|ui| {
             ui.add_space(12.0);
-            for (i,label) in ["Экземпляры","Настройки"].iter().enumerate() {
+            for (i,label) in ["Экземпляры","Настройки","Аккаунт Ely.by"].iter().enumerate() {
                 if ui.selectable_label(self.tab==i,*label).clicked(){self.tab=i;}
             }
             ui.with_layout(egui::Layout::bottom_up(egui::Align::Min),|ui| {ui.label(egui::RichText::new("VoidLauncher 0.1.0").weak());});
@@ -213,7 +310,7 @@ impl App for VoidLauncher {
                         ui.add_space(6.0);
                     }
                 }
-                _=>{
+                1=>{
                     ui.heading(egui::RichText::new("НАСТРОЙКИ").color(egui::Color32::from_rgb(205,145,255)).size(25.0).strong());
                     if let Some(inst)=self.settings.instances.get(self.settings.active_instance).cloned(){
                         ui.label(format!("Активный экземпляр: {} ({})",inst.name,inst.version));
@@ -235,6 +332,26 @@ impl App for VoidLauncher {
                     ui.horizontal(|ui|{ui.label("Корневая папка:");ui.text_edit_singleline(&mut self.settings.minecraft_dir);});
                     if ui.button("Сохранить настройки").clicked(){self.save();}
                     ui.hyperlink_to("Регистрация и аккаунт Ely.by","https://ely.by/");
+                }
+                _=>{
+                    ui.heading(egui::RichText::new("АККАУНТ ELY.BY").color(egui::Color32::from_rgb(205,145,255)).size(25.0).strong());
+                    if let Some(session) = &self.ely_session {
+                        ui.label(format!("Выполнен вход: {}", session.username));
+                        if ui.button("Выйти из Ely.by").clicked() { self.ely_session = None; self.status = "Выход из аккаунта выполнен.".into(); }
+                    } else {
+                        ui.label("Войди через Ely.by, чтобы запускать Minecraft с этим аккаунтом.");
+                        ui.label("Логин или email:");
+                        ui.text_edit_singleline(&mut self.ely_username);
+                        ui.label("Пароль:");
+                        ui.add(egui::TextEdit::singleline(&mut self.ely_password).password(true));
+                        ui.label("TOTP-код (только если включена 2FA):");
+                        ui.text_edit_singleline(&mut self.ely_totp);
+                        if ui.add_enabled(!self.busy, egui::Button::new("Войти через Ely.by")).clicked() { self.login_ely(); }
+                        ui.hyperlink_to("Открыть Ely.by","https://ely.by/");
+                        ui.label(egui::RichText::new("Пароль не сохраняется; сессия действует только пока открыт лаунчер.").weak().small());
+                    }
+                    ui.separator();
+                    ui.label("Offline-вход остаётся доступен во вкладке «Настройки».");
                 }
             }
             ui.add_space(20.0);ui.separator();
