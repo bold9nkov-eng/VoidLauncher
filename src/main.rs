@@ -182,14 +182,39 @@ impl VoidLauncher {
                 fs::create_dir_all(&game_dir).map_err(|e| e.to_string())?;
                 send(format!("Скачивание файлов Minecraft {version} и Fabric…"));
                 let launcher = mc_launcher_core::prelude::Launcher::new(&game_dir);
-                let request = mc_launcher_core::prelude::InstallRequest {
-                    minecraft_version: version,
-                    loader: Some(mc_launcher_core::prelude::LoaderSpec::Fabric {
-                        version: mc_launcher_core::prelude::LoaderVersion::LatestStable,
-                    }),
-                    java: mc_launcher_core::prelude::JavaInstallPolicy::Auto,
-                };
-                let installed = launcher.install(request).map_err(|e| e.to_string())?;
+                let mut installed = None;
+                let mut last_error = String::from("Не удалось установить Minecraft.");
+                for attempt in 1..=5 {
+                    let request = mc_launcher_core::prelude::InstallRequest {
+                        minecraft_version: version.clone(),
+                        loader: Some(mc_launcher_core::prelude::LoaderSpec::Fabric {
+                            version: mc_launcher_core::prelude::LoaderVersion::LatestStable,
+                        }),
+                        java: mc_launcher_core::prelude::JavaInstallPolicy::Auto,
+                    };
+                    match launcher.install(request) {
+                        Ok(value) => { installed = Some(value); break; }
+                        Err(error) => {
+                            last_error = error.to_string();
+                            let lower = last_error.to_lowercase();
+                            let retryable = lower.contains("network")
+                                || lower.contains("error sending request")
+                                || lower.contains("timed out")
+                                || lower.contains("timeout")
+                                || lower.contains("connection")
+                                || lower.contains("temporarily unavailable")
+                                || lower.contains("tls");
+                            if !retryable || attempt == 5 { break; }
+                            let delay = 2_u64.pow(attempt as u32);
+                            send(format!("Сеть прервала загрузку. Повторная попытка {}/5 через {} сек…", attempt + 1, delay));
+                            std::thread::sleep(std::time::Duration::from_secs(delay));
+                        }
+                    }
+                }
+                let installed = installed.ok_or_else(|| format!(
+                    "{} После 5 попыток загрузка не завершилась. Проверь соединение и нажми «Играть» ещё раз — уже скачанные файлы будут проверены повторно.",
+                    last_error
+                ))?;
                 send("Игра установлена. Подготовка Java-команды…".into());
                 let profile = launcher.load_version(&installed.version_id).map_err(|e| e.to_string())?;
                 let account = if let Some(session) = ely_session {
