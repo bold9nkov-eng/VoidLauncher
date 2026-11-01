@@ -110,7 +110,7 @@ impl VoidLauncher {
         let game_dir = PathBuf::from(&instance.path);
         self.status = format!("Установка Minecraft {version} + Fabric и запуск…");
         std::thread::spawn(move || {
-            let result = (|| -> Result<(), String> {
+            let result = (|| -> std::result::Result<(), String> {
                 fs::create_dir_all(&game_dir).map_err(|e| e.to_string())?;
                 let launcher = mc_launcher_core::prelude::Launcher::new(&game_dir);
                 let request = mc_launcher_core::prelude::InstallRequest {
