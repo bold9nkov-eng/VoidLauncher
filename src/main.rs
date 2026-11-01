@@ -253,7 +253,7 @@ impl App for VoidLauncher {
                     }
                 } else {
                     self.status = message;
-                    if self.status.starts_with("Готово:") || self.status.starts_with("Ошибка:") { self.busy = false; }
+                    if self.status.starts_with("Готово:") || self.status.starts_with("Ошибка") { self.busy = false; }
                 }
             }
         }
